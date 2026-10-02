@@ -1,0 +1,84 @@
+name: 发布可执行包
+
+# 发布一个新版本时，把"能直接放进 mpv 的那一份"打成 zip 挂到这次 Release 上：
+# mpv/main.lua + AOT 产物 omnisubs.exe + 随包分发的 ffmpeg/ffprobe + 密钥留空的 omnisubs.json。
+# 用户下载解压、填好 omnisubs.json 就能用，不必另装 ffmpeg，也不必自己拼目录。
+#
+# 手动触发（workflow_dispatch）只组包、不上传，用来在真发布之前验一遍这一步。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# 往 Release 上挂资产要写权限。
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+
+    env:
+      PACKAGE: omnisubs # 解压出来的目录名，也就是 scripts/ 下那一层
+      ARCHIVE: omnisubs-mpv-win-x64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: 编译 AOT 产物
+        run: dotnet publish -c Release
+
+      # ffmpeg 不在版本库里（几百 MB，且它自己就是一份构建产物），组包时现取一份。
+      - name: 取 ffmpeg / ffprobe
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg
+          $bin = Get-ChildItem ffmpeg -Recurse -Directory -Filter bin | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path tools | Out-Null
+          Copy-Item (Join-Path $bin.FullName ffmpeg.exe) tools/
+          Copy-Item (Join-Path $bin.FullName ffprobe.exe) tools/
+
+      - name: 组包
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:PACKAGE/tools" | Out-Null
+
+          Copy-Item mpv/main.lua $env:PACKAGE
+          Copy-Item bin/Release/net10.0/win-x64/publish/omnisubs.exe $env:PACKAGE
+          Copy-Item -Path tools/ffmpeg.exe, tools/ffprobe.exe -Destination "$env:PACKAGE/tools"
+
+          # 密钥不随包出去：模板里那行占位密钥换成空串。注释与别的字段原样留着 ——
+          # 它们本来就是给用户看的说明。真实密钥只在开发机上那份 omnisubs.json 里，
+          # 那个文件不进版本库，这里也不读它。
+          $json = (Get-Content omnisubs.json.example -Raw -Encoding utf8) -replace 'sk-<your-api-key>', ''
+          # WriteAllText 写 UTF-8 无 BOM，在 PowerShell 5.1 与 7 上是同一个行为。
+          [System.IO.File]::WriteAllText("$PWD\$env:PACKAGE\omnisubs.json", $json)
+
+          # 自己写条目，不用 Compress-Archive：后者在 Windows PowerShell 里会把路径分隔符写成反斜杠
+          # 存进条目名，那样的包 unzip / macOS 解不开。这里一律正斜杠。
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $root = (Get-Location).Path
+          $zip = [System.IO.Compression.ZipFile]::Open("$PWD\$env:ARCHIVE", 'Create')
+          try {
+            Get-ChildItem $env:PACKAGE -Recurse -File | ForEach-Object {
+              $entry = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
+              [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $entry) | Out-Null
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+      - name: 上传工作流产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnisubs-mpv-win-x64
+          path: omnisubs-mpv-win-x64.zip
+
+      - name: 挂到这次 Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$env:ARCHIVE" --clobber

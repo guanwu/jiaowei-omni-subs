@@ -1,0 +1,40 @@
+{
+  // 复制为 "omnisubs.json"，与 omnisubs.exe 放在一起，填上真实的值。见 README.md。
+  //
+  // 这里只有静态的模型信息。要开哪个功能在命令行上给：
+  //   omnisubs 剧集.mkv                                 只出音频字幕
+  //   omnisubs 剧集.mkv --model-video video             音频字幕 + 视频字幕
+
+  "models": {
+    // 音频字幕用的档位，也是没写 --model-audio 时的默认档位。
+    "default": {
+      // OpenAI 兼容端点，结尾不要带斜杠。
+      "baseUrl": "https://<your-endpoint-host>/compatible-mode/v1",
+
+      // 密钥。必填 —— 只从这份文件里取，不看环境变量。
+      "apiKey": "sk-<your-api-key>",
+
+      // 听写并翻译音频的模型。
+      "model": "qwen3.8-omni-flash"
+    },
+
+    // 视频字幕可以换另一个多模态模型，用 --model-video video 选中它。
+    "video": {
+      "baseUrl": "https://<your-endpoint-host>/v1",
+      "apiKey": "sk-<your-api-key>",
+      "model": "<vision-model>"
+    }
+  }
+
+  // 档位的可选字段（上面两个档位都可以加），不写就取内核默认值：
+  //   maxTokens       一次窗口回答的上限
+  //   temperature     采样温度
+  //   thinkingBudget  思维链预算；不写或写 0 就不向端点要思维链
+  //   prompt          该档位的规则段模板。提示词与模型相关（不同厂商对格式的服从度不同），
+  //                   所以跟着档位走。它只能换掉"按通道的规则"那一段 ——
+  //                   说明这段媒体在片子哪个位置的开头、以及让模型把术语报回来的结尾，
+  //                   是解析器认的格式契约，不可替换。
+  // 例：
+  //   "maxTokens": 8192, "temperature": 0.2, "thinkingBudget": 1024,
+  //   "prompt": "..."
+}

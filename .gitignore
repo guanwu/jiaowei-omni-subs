@@ -1,0 +1,15 @@
+bin/
+obj/
+
+# 运行期配置，里面有 API key。可以提交的模板是 omnisubs.json.example。
+omnisubs.json
+
+# 术语记忆文件跟着视频走，不属于仓库；万一放在仓库目录里也不该提交。
+omnisubs.glossary.json
+
+# 随程序分发的 ffmpeg 压缩包（几百 MB，且它自己就是一份构建产物）。
+tools/
+
+# 验证素材与它的产物：`Video.mkv` 是测试用的片子，`Video.srt` 是它跑出来的字幕。
+Video.mkv
+Video.srt
