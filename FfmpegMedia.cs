@@ -74,16 +74,12 @@ internal sealed class FfmpegMedia(string ffmpegPath, string ffprobePath)
             input,
         ];
 
-        var result = await FfmpegProcess
-            .RunAsync(ffprobePath, arguments, cancellationToken)
+        var result = await RunToolAsync(
+                ffprobePath,
+                $"读不了 {Path.GetFileName(input)}",
+                arguments,
+                cancellationToken)
             .ConfigureAwait(false);
-
-        if (result.ExitCode != 0)
-        {
-            throw new MediaException(
-                $"ffprobe 读不了 {Path.GetFileName(input)}（退出码 {result.ExitCode}）。",
-                result.StandardError.Trim());
-        }
 
         ProbeResult? probe;
         try
@@ -127,48 +123,24 @@ internal sealed class FfmpegMedia(string ffmpegPath, string ffprobePath)
         MediaWindow window,
         CancellationToken cancellationToken)
     {
-        var output = NewTempPath(Defaults.AudioFormat);
+        var arguments = new List<string> { "-hide_banner", "-nostdin", "-loglevel", "error", "-y" };
+        Seek(arguments, window, input);
+        SelectAudio(arguments, track);
 
-        try
-        {
-            var arguments = new List<string>
-            {
-                "-hide_banner",
-                "-nostdin",
-                "-loglevel", "error",
-                "-y",
+        arguments.AddRange(
+        [
+            "-ac", Defaults.AudioChannels.ToString(CultureInfo.InvariantCulture),
+            "-ar", Defaults.AudioSampleRate.ToString(CultureInfo.InvariantCulture),
+            "-c:a", "libmp3lame",
+            "-b:a", $"{Defaults.AudioKbps}k",
+        ]);
 
-                // -ss 在 -i 之前是跳着读；输出的时间戳因此相对窗口起点，而不是相对整部片子。
-                "-ss", FfmpegTimes.Seconds(window.Start),
-                "-t", FfmpegTimes.Seconds(window.Duration),
-                "-i", input,
-                "-vn",
-                "-map", Specifier(track),
-                "-ac", Defaults.AudioChannels.ToString(CultureInfo.InvariantCulture),
-                "-ar", Defaults.AudioSampleRate.ToString(CultureInfo.InvariantCulture),
-                "-c:a", "libmp3lame",
-                "-b:a", $"{Defaults.AudioKbps}k",
-                output,
-            };
-
-            var result = await FfmpegProcess
-                .RunAsync(ffmpegPath, arguments, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (result.ExitCode != 0)
-            {
-                throw new MediaException(
-                    $"ffmpeg 切不出 {Path.GetFileName(input)} 的第 {window.Index} 个窗口（退出码 {result.ExitCode}）。",
-                    result.StandardError.Trim());
-            }
-
-            var bytes = await File.ReadAllBytesAsync(output, cancellationToken).ConfigureAwait(false);
-            return new ModelMediaPart(ModelMediaKind.Audio, bytes, Defaults.AudioFormat);
-        }
-        finally
-        {
-            TryDelete(output);
-        }
+        return await RenderAsync(
+                $"切不出 {Path.GetFileName(input)} 的第 {window.Index} 个窗口",
+                ModelMediaKind.Audio,
+                arguments,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -181,32 +153,24 @@ internal sealed class FfmpegMedia(string ffmpegPath, string ffprobePath)
         MediaWindow window,
         CancellationToken cancellationToken)
     {
-        var arguments = new List<string>
-        {
-            "-hide_banner",
-            "-nostats",
-            "-loglevel", "info",
-            "-ss", FfmpegTimes.Seconds(window.Start),
-            "-t", FfmpegTimes.Seconds(window.Duration),
-            "-i", input,
-            "-vn",
-            "-map", Specifier(track),
+        var arguments = new List<string> { "-hide_banner", "-nostats", "-loglevel", "info" };
+        Seek(arguments, window, input);
+        SelectAudio(arguments, track);
+
+        arguments.AddRange(
+        [
             "-af", $"silencedetect=noise={Defaults.SilenceThresholdDb}dB"
                     + $":d={Defaults.MinimumSilenceSeconds.ToString(CultureInfo.InvariantCulture)}",
             "-f", "null",
             "-",
-        };
+        ]);
 
-        var result = await FfmpegProcess
-            .RunAsync(ffmpegPath, arguments, cancellationToken)
+        var result = await RunToolAsync(
+                ffmpegPath,
+                $"分析不了 {Path.GetFileName(input)} 的第 {window.Index} 个窗口",
+                arguments,
+                cancellationToken)
             .ConfigureAwait(false);
-
-        if (result.ExitCode != 0)
-        {
-            throw new MediaException(
-                $"ffmpeg 分析不了 {Path.GetFileName(input)} 的第 {window.Index} 个窗口（退出码 {result.ExitCode}）。",
-                result.StandardError.Trim());
-        }
 
         return new MediaSpeechMap(Invert(ParseSilences(result.StandardError), window.Duration));
     }
@@ -220,58 +184,100 @@ internal sealed class FfmpegMedia(string ffmpegPath, string ffprobePath)
         MediaWindow window,
         CancellationToken cancellationToken)
     {
-        var output = NewTempPath(Defaults.FrameFormat);
+        var arguments = new List<string> { "-hide_banner", "-nostdin", "-loglevel", "error", "-y" };
+        Seek(arguments, window, input);
+
+        // 只送画面；声音由音频那一半单独送。
+        arguments.AddRange(["-an", "-map", "0:v:0"]);
+
+        // fps 的分子分母按毫秒写，间隔小于 1 秒时也说得出来（250 毫秒 → fps=1000/250）。
+        // scale 的逗号要括住整个式子，否则会被当成两个滤镜的连接符。
+        arguments.AddRange(
+        [
+            "-vf", $"fps=1000/{Defaults.FrameInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture)}"
+                    + $",scale=-2:'min({Defaults.FrameHeight},ih)'",
+            "-c:v", "libx265",
+            "-preset", "medium",
+            "-crf", Defaults.FrameQuality.ToString(CultureInfo.InvariantCulture),
+            "-pix_fmt", "yuv420p",
+            "-tag:v", "hvc1",
+        ]);
+
+        return await RenderAsync(
+                $"取不出 {Path.GetFileName(input)} 的第 {window.Index} 段画面",
+                ModelMediaKind.Video,
+                arguments,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 跑一次 ffmpeg / ffprobe 并把失败变成异常：退出码非 0 时把 <paramref name="action"/>
+    /// （"切不出 x.mkv 的第 2 个窗口"这样的人话）和它自己报的原因一起抛出去；成功则把输出交回调用方。
+    /// </summary>
+    private static async Task<FfmpegProcessResult> RunToolAsync(
+        string executable,
+        string action,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var result = await FfmpegProcess
+            .RunAsync(executable, arguments, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            throw new MediaException(
+                $"{Path.GetFileNameWithoutExtension(executable)} {action}（退出码 {result.ExitCode}）。",
+                result.StandardError.Trim());
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 渲染一段媒体：<paramref name="arguments"/> 是给 ffmpeg 的参数，输出文件由这里补在最后 ——
+    /// 于是临时文件一定落在临时目录、无论成败都被删掉。交给模型的那段字节用这个模态自己的
+    /// 容器格式（<see cref="Defaults.AudioFormat"/> / <see cref="Defaults.FrameFormat"/>）。
+    /// </summary>
+    private async Task<ModelMediaPart> RenderAsync(
+        string action,
+        ModelMediaKind kind,
+        List<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var format = kind == ModelMediaKind.Audio ? Defaults.AudioFormat : Defaults.FrameFormat;
+        var output = NewTempPath(format);
+        arguments.Add(output);
 
         try
         {
-            var arguments = new List<string>
-            {
-                "-hide_banner",
-                "-nostdin",
-                "-loglevel", "error",
-                "-y",
-
-                // 同音频：-ss 在 -i 之前是跳着读，输出这一段的时刻从 0 起。
-                "-ss", FfmpegTimes.Seconds(window.Start),
-                "-t", FfmpegTimes.Seconds(window.Duration),
-                "-i", input,
-
-                // 只送画面；声音由音频那一半单独送。
-                "-an",
-                "-map", "0:v:0",
-
-                // fps 的分子分母按毫秒写，间隔小于 1 秒时也说得出来（250 毫秒 → fps=1000/250）。
-                // scale 的逗号要括住整个式子，否则会被当成两个滤镜的连接符。
-                "-vf", $"fps=1000/{Defaults.FrameInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture)}"
-                        + $",scale=-2:'min({Defaults.FrameHeight},ih)'",
-
-                "-c:v", "libx265",
-                "-preset", "medium",
-                "-crf", Defaults.FrameQuality.ToString(CultureInfo.InvariantCulture),
-                "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",
-                output,
-            };
-
-            var result = await FfmpegProcess
-                .RunAsync(ffmpegPath, arguments, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (result.ExitCode != 0)
-            {
-                throw new MediaException(
-                    $"ffmpeg 取不出 {Path.GetFileName(input)} 的第 {window.Index} 段画面（退出码 {result.ExitCode}）。",
-                    result.StandardError.Trim());
-            }
+            await RunToolAsync(ffmpegPath, action, arguments, cancellationToken).ConfigureAwait(false);
 
             var bytes = await File.ReadAllBytesAsync(output, cancellationToken).ConfigureAwait(false);
-            return new ModelMediaPart(ModelMediaKind.Video, bytes, Defaults.FrameFormat);
+            return new ModelMediaPart(kind, bytes, format);
         }
         finally
         {
             TryDelete(output);
         }
     }
+
+    /// <summary>
+    /// 定位到一个窗口的起点：<c>-ss</c> 放在 <c>-i</c> 之前是跳着读，输出这一段的时刻
+    /// 因此相对窗口起点，而不是相对整部片子。
+    /// </summary>
+    private static void Seek(List<string> arguments, MediaWindow window, string input) =>
+        arguments.AddRange(
+        [
+            "-ss", FfmpegTimes.Seconds(window.Start),
+            "-t", FfmpegTimes.Seconds(window.Duration),
+            "-i", input,
+        ]);
+
+    /// <summary>只要这一条音轨，不取画面。</summary>
+    private static void SelectAudio(List<string> arguments, MediaAudioTrack track) =>
+        arguments.AddRange(["-vn", "-map", Specifier(track)]);
 
     /// <summary>把给人看的序号换算成 ffmpeg 的说法：它从 0 数起。</summary>
     private static string Specifier(MediaAudioTrack track) => $"0:a:{track.Number - 1}";
