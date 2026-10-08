@@ -31,8 +31,8 @@ omnisubs "D:/剧集/第一季" --model-video video  # 目录递归处理
 ```bash
 # 从源码跑
 cp omnisubs.json.example omnisubs.json            # 填上 baseUrl / apiKey / model
-dotnet build
-cp omnisubs.json bin/Debug/net10.0/               # 配置必须待在 exe 旁边
+dotnet build                                      # 项目根的 omnisubs.json 会被自动拷到
+                                                  # bin/Debug/net10.0/win-x64/；改了配置要重新 build
 dotnet run -- 剧集E01.mkv
 dotnet publish -c Release                         # Native AOT 产物
 ```
@@ -149,4 +149,4 @@ Actions 页里手动 `Run workflow` 那一路**只组包、不上传** —— �
 它只用来验证这一步。**所以手动跑出一片绿色并不代表 Release 上有包**；要重新生成某个版本的包，
 从那次 release 触发的 run 上点 `Re-run all jobs`。
 
-本项目没有测试工程；验证素材是根目录的 `Video.mkv`（未进版本库）。
+本项目没有测试工程；验证素材（根目录的 `Video.mkv`，未进版本库）要自备。

@@ -36,7 +36,10 @@ OmniSubs 是一个 Windows x64 命令行程序，用多模态大模型给视频�
 - **外部依赖是 ffmpeg / ffprobe**（不是 NuGet，是随包分发的 exe）。
 - 使用 .NET 10 的 `System.Threading.Lock`（`lock (someLock)` 的锁对象类型）、
   `[GeneratedRegex]` 源生成正则、集合表达式 `[]`、file-scoped namespace、record、
-  primary constructor。代码风格是"每个类型一个文件、扁平放在项目根、靠 namespace 分组"。
+  primary constructor。代码风格是"扁平放在项目根、靠 namespace 分组"；
+  **一个文件承载一个概念**，同一份上下文里的几个小类型刻意住在一起
+  （`OpenAiModel.cs` 的 `Wire*` 报文、`FfmpegMedia.cs` 的 `Probe*`、`MediaInfo.cs` 的 `MediaAudioTrack`），
+  不追求一类型一文件。
 
 ## 构建、运行与验证
 
@@ -53,8 +56,8 @@ dotnet publish -c Release   # Native AOT 单文件产物：bin/Release/net10.0/w
   `Condition="Exists(...)"` 的 `None` 项，**只要构建时项目根有 `omnisubs.json`，就会自动拷到输出目录**；
   所以本地开发通常不必手工拷贝，但**新建/修改配置后要重新 build** 才会被带过去。
 - 本地验证：直接跑 `dotnet run -- <某个视频> --progress-file <临时文件>`。
-- **本项目没有测试工程**。唯一的验证素材是项目根的 `Video.mkv`（未进版本库，见 `.gitignore`）。
-  改动后请用真实的视频端到端跑一遍，不要只跑编译。
+- **本项目没有测试工程**。验证素材（`.gitignore` 里的 `Video.mkv`）不进版本库，本机要跑端到端
+  得自备一段样片。改动后请用真实的视频跑一遍，不要只跑编译。
 - 退出码是明确契约（`Program.cs` 顶部常量）：`0` 成功 · `1` 部分失败 · `2` 用法错误 ·
   `3` 缺组件（ffmpeg/ffprobe）· `4` 缺凭据 · `5` 配置错误 · `130` 取消（Ctrl+C）。
 
@@ -64,28 +67,29 @@ dotnet publish -c Release   # Native AOT 单文件产物：bin/Release/net10.0/w
 
 | namespace | 文件 | 职责 |
 |---|---|---|
-| `OmniSubs` | `Program.cs`, `Defaults.cs`, `Log.cs`, `MediaException.cs` | 入口编排、全局可调常量、控制台与进度文件输出 |
-| `OmniSubs.Cli` | `CliOptions.cs` | 命令行解析与用法文本 |
+| `OmniSubs` | `Program.cs`, `Defaults.cs`, `Log.cs`, `ProgressFile.cs`, `MediaException.cs` | 入口编排、全局可调常量、控制台输出、给前端的进度文件 |
+| `OmniSubs.Cli` | `CliOptions.cs`, `Targets.cs` | 命令行解析与用法文本；输入展开成待处理清单 |
 | `OmniSubs.Config` | `ConfigFile.cs`, `OpenAiProfile.cs`, `OpenAiBinding.cs` | 读 `omnisubs.json`，把档位 id 解析成确定值 + 凭据 |
-| `OmniSubs.Media` | `MediaInfo.cs`, `MediaWindow.cs`, `MediaSpeechMap.cs` | 领域模型：探测结论、窗口切分、人声边界 |
+| `OmniSubs.Media` | `MediaInfo.cs`, `MediaWindow.cs`, `MediaSpeechMap.cs` | 领域模型：探测结论（含音轨选择）、窗口切分、人声边界 |
 | `OmniSubs.Media.Ffmpeg` | `FfmpegMedia.cs`, `FfmpegTools.cs`, `FfmpegProcess.cs`, `FfmpegTimes.cs` | 唯一碰 ffmpeg/ffprobe 的地方 |
 | `OmniSubs.Model` | `IMultimodalModel.cs`, `ModelRequest.cs`, `ModelMediaPart.cs` | 与模型之间的**契约层** |
 | `OmniSubs.Model.OpenAi` | `OpenAiModel.cs` | 契约的一个实现：OpenAI 兼容端点 |
-| `OmniSubs.Recognition` | `Subtitler.cs`, `Prompt.cs` | 把一部影片变成字幕；提示词拼装 |
-| `OmniSubs.Subtitles` | `Srt.cs`, `SubtitleFile.cs` | SRT 读写、双通道合成、字幕落盘 |
-| `OmniSubs.Glossary` | `GlossaryFile.cs` | 术语记忆文件的读写与合并 |
+| `OmniSubs.Recognition` | `Subtitler.cs`, `Prompt.cs`, `LaneCues.cs`, `TermExchange.cs` | 把一部影片变成字幕；提示词拼装；一条通道的条目累积（含跨窗去重）；两条通道共用的术语记忆 |
+| `OmniSubs.Subtitles` | `Srt.cs`, `SubtitleFile.cs` | SRT 读写、双通道合成、字幕落盘（写盘排队归落盘那一处） |
+| `OmniSubs.Glossary` | `GlossaryFile.cs`, `Glossaries.cs` | 术语记忆文件的读写与合并；本次运行要用哪几份 |
 
 ### 主流程（`Program.cs` → `Subtitler.RunAsync`）
 
 1. `CliOptions.TryParse` 解析参数（`--model-audio` / `--model-video` / `--no-glossary` /
    `--audio-track` / `--progress-file` / `-h`）。
-2. `Log.OpenProgressFile` 打开进度文件（**在读配置之前**，好让失败那几次也留下终态记录）。
+2. `ProgressFile.TryOpen` 打开进度文件（**在读配置之前**，好让失败那几次也留下终态记录）。
 3. `ConfigFile.TryLoad` 读 `omnisubs.json`；`OpenAiBinding.Resolve` 把档位 id 对上、补齐凭据。
-4. `ResolveTargets` 展开输入（文件或**递归目录**），按 `Defaults.VideoExtensions` 判类型。
+4. `Targets.TryResolve` 展开输入（文件或**递归目录**），按 `Defaults.VideoExtensions` 判类型。
 5. `FfmpegMedia.TryCreate` 定位 ffmpeg/ffprobe（查找顺序：`PATH` → exe 同目录 → exe 同目录 `tools/`）。
-6. 每个输入目录各读一份 `GlossaryFile`（同目录所有视频共享一份术语表）。
+6. `Glossaries.Load` 给每个输入目录各读一份 `GlossaryFile`（同目录所有视频共享一份术语表），
+   之后"这个视频用哪一份"由它回答。
 7. 对每个视频构造 `Subtitler`，对白通道与画面通道**各跑一个 Task 并发执行**；
-   每个窗口完成后把整份 `.srt` 重写一遍（写盘用一把 `Lock` 排队）。
+   每个窗口完成后把整份 `.srt` 重写一遍（写盘由 `SubtitleFile` 自己排队）。
 
 ## 关键设计约定（改动时必须遵守）
 
@@ -96,7 +100,8 @@ dotnet publish -c Release   # Native AOT 单文件产物：bin/Release/net10.0/w
   `OmniSubs.Model.OpenAi`**，是为了避免 `Config` 与 `Model.OpenAi` 循环依赖 ——
   这是"实现挂在契约之下"的**显式例外**，`OpenAiProfile.cs` 的注释里写明了理由。
 - **两个坐标系不可混用**：`SubtitleWindowCue` 的时刻以窗口起点为 0；
-  `SubtitleCue` 的时刻相对整片开头。换算只在 `Subtitler.Candidate.Place()` 里做。
+  `SubtitleCue` 的时刻相对整片开头。换算归 `LaneCues` 管：窗口时刻进、整片时刻出，
+  跨窗口去重也在那里（`Candidate.Place()`）。
   人声边界的吸附**必须在段内做**（`MediaSpeechMap`）。
 - **失败隔离**：单个窗口超时/报错/回答读不动就跳过并报出缺了哪一段，不拖垮整部片子；
   `OpenAiModel.CompleteAsync` 对可重发的失败（超时、网络错误、5xx、限流）**只重试一次**，
@@ -105,8 +110,10 @@ dotnet publish -c Release   # Native AOT 单文件产物：bin/Release/net10.0/w
   合并规则是**首译优先**（已存在的原文不覆盖）。每有新译名就落盘（先写 `.tmp` 再 `File.Move` 替换）。
 - **落盘错误不抛异常**：`SubtitleFile.LastError` / `GlossaryFile.LastError` 记录原因，由 `Program` 在跑完后
   报出；一次写不动下个窗口还会再写。
-- **所有常量集中在 `Defaults.cs`**（窗口长度、重叠、静音门限、音频/画面格式、token 上限、
+- **可调旋钮都在 `Defaults.cs`**（窗口长度、重叠、静音门限、音频/画面格式、token 上限、
   HTTP 超时、换行与置顶标签……）。这些**不作为命令行参数暴露，要调就改这里**。
+  与之相对，某个模块自己的实现常量就地留着，不往上搬（`OpenAiModel.RetryDelay`、
+  `FfmpegProcess.OutputLimitChars`、`GlossaryFile` 落盘用的 `.tmp` 后缀……）。
   提示词里引用的采样间隔（`FrameInterval`）必须与 ffmpeg 实际重采样间隔一致。
 - **输出格式契约**：`UTF-8 无 BOM` + `LF` 换行（`Defaults.NewLine`）。
   字幕与术语表的 JSON 都用源生成器，写盘时 `UnsafeRelaxedJsonEscaping`（不转义非 ASCII）。
