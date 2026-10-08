@@ -50,7 +50,7 @@ internal sealed class Subtitler(
             + $" · 重叠 {Defaults.WindowOverlap.TotalSeconds:F0} 秒 · {track.Describe()}");
 
         // 画面那一条对术语只读不写：沿用对白到这一刻为止定下的译名，但不把新名字写回表 ——
-        // 术语表只由对白通道增长。
+        // 术语表只由对白通道增长（见 TermExchange）。
         Channel? onVideo = null;
 
         if (videoModel is { } pictureModel)
@@ -61,7 +61,7 @@ internal sealed class Subtitler(
                     SubtitleCueLane.Video,
                     pictureModel,
                     windows.Count,
-                    null,
+                    TermExchange.For(SubtitleCueLane.Video, glossary),
                     (window, token) => ReadVideoAsync(media, input, window, token));
             }
             else
@@ -75,7 +75,7 @@ internal sealed class Subtitler(
             SubtitleCueLane.Audio,
             audioModel,
             windows.Count,
-            glossary,
+            TermExchange.For(SubtitleCueLane.Audio, glossary),
             (window, token) => ReadAudioAsync(media, input, track, window, token));
 
         var channels = new List<Channel> { dialogue };
@@ -85,13 +85,13 @@ internal sealed class Subtitler(
             channels.Add(onVideo);
         }
 
-        // 一条通道在自己的任务里走完全部窗口。两条通道的差别只剩两处：取媒体，
-        // 以及沿用的译名从哪儿来 —— 后者按窗给。
-        async Task RunLaneAsync(Channel channel, Func<IReadOnlyList<GlossaryTerm>?> terms)
+        // 一条通道在自己的任务里走完全部窗口。两条通道的差别都装在 Channel 里：取什么媒体、
+        // 跟术语表怎么打交道。
+        async Task RunLaneAsync(Channel channel)
         {
             foreach (var window in windows)
             {
-                var changed = await AdvanceAsync(channel, window, terms(), cancellationToken)
+                var changed = await AdvanceAsync(channel, window, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (changed)
@@ -102,16 +102,11 @@ internal sealed class Subtitler(
             }
         }
 
-        var lanes = new List<Task>
-        {
-            // 对白读的就是那本活的表：它就是写表的那一条。
-            RunLaneAsync(dialogue, () => glossary?.Terms),
-        };
+        var lanes = new List<Task> { RunLaneAsync(dialogue) };
 
         if (onVideo is not null)
         {
-            // 表还在长，所以每窗都要一份新的拷贝。
-            lanes.Add(RunLaneAsync(onVideo, () => glossary?.Snapshot()));
+            lanes.Add(RunLaneAsync(onVideo));
         }
 
         await Task.WhenAll(lanes).ConfigureAwait(false);
@@ -126,50 +121,30 @@ internal sealed class Subtitler(
 
     /// <summary>
     /// 一条通道走一窗，把这一窗的条目并进它自己那一份里；返回这一份有没有变。
-    /// <paramref name="terms"/> 是要模型沿用的已定译名，<see cref="Channel.Memory"/> 是这一段新定下的
-    /// 名字并进哪里；两者为 <c>null</c> 都表示这一条不谈术语。
     /// </summary>
     private async Task<bool> AdvanceAsync(
         Channel channel,
         MediaWindow window,
-        IReadOnlyList<GlossaryTerm>? terms,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         Log.Info($"    {channel.Label} {window.Index}/{channel.Total} · {window.Describe()}");
 
-        WindowOutcome outcome;
-
-        try
+        if (await AskWindowAsync(channel, window, cancellationToken).ConfigureAwait(false) is not { } outcome)
         {
-            var media = await channel.Read(window, cancellationToken).ConfigureAwait(false);
-            outcome = await AskAsync(
-                channel.Lane, channel.Model, window, media, terms, channel.Memory, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // 取消不是这一段的错，整次运行到此为止。
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // 一段坏掉不带走整部片子。代价是这一段内容缺失，所以要把缺在哪报清楚。
-            channel.Failed++;
-            Log.Warn($"        这一段作废，它这一段的内容会缺失：{ex.Message}");
             return false;
         }
 
         channel.InputTokens += outcome.InputTokens;
         channel.OutputTokens += outcome.OutputTokens;
 
-        if (channel.Memory is not null)
+        if (channel.Terms.Memory is { } memory)
         {
-            var added = channel.Memory.Merge(outcome.Terms);
+            var added = memory.Merge(outcome.Terms);
             if (added > 0)
             {
-                Log.Info($"        新术语 {added} 条，术语表共 {channel.Memory.Count} 条");
+                Log.Info($"        新术语 {added} 条，术语表共 {memory.Count} 条");
             }
         }
 
@@ -184,13 +159,41 @@ internal sealed class Subtitler(
     }
 
     /// <summary>
-    /// 一条通道走到某一窗为止的状态。术语只留"往里收"这一头（<see cref="Memory"/>）。
+    /// 取这一窗的媒体、问模型、把回答收进这个窗口自己的坐标系。
+    ///
+    /// 一段坏掉不带走整部片子：代价是这一段内容缺失，所以要把缺在哪报清楚，作废的段数记在通道上，
+    /// 返回 <c>null</c> 表示这一窗什么都没拿到。取消不是这一段的错，整次运行到此为止。
+    /// </summary>
+    private async Task<WindowOutcome?> AskWindowAsync(
+        Channel channel,
+        MediaWindow window,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var media = await channel.Read(window, cancellationToken).ConfigureAwait(false);
+            return await AskAsync(channel, window, media, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            channel.Failed++;
+            Log.Warn($"        这一段作废，它这一段的内容会缺失：{ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 一条通道走到某一窗为止的状态。
     /// </summary>
     private sealed class Channel(
         SubtitleCueLane lane,
         IMultimodalModel model,
         int total,
-        GlossaryFile? memory,
+        TermExchange terms,
         Func<MediaWindow, CancellationToken, Task<WindowMedia>> read)
     {
         public SubtitleCueLane Lane => lane;
@@ -202,8 +205,8 @@ internal sealed class Subtitler(
         /// <summary>这一条通道一共几段。</summary>
         public int Total => total;
 
-        /// <summary>这一段新定下的名字并进哪里；<c>null</c> 表示不回收，也就不问它要。</summary>
-        public GlossaryFile? Memory => memory;
+        /// <summary>这一条通道跟术语表怎么打交道：沿用的译名从哪儿读、回不回收、并进哪一本表。</summary>
+        public TermExchange Terms => terms;
 
         /// <summary>日志与小结里这条通道的名字。</summary>
         public string Label => lane == SubtitleCueLane.Audio ? "对白" : "画面";
@@ -240,27 +243,24 @@ internal sealed class Subtitler(
     }
 
     /// <summary>
-    /// 问一个窗口，把回答里的条目收进这个窗口自己的坐标系，并吸附到量出来的人声边界上 ——
-    /// 那些边界量在这一段音频上，吸附必须在段内做。平移不在这里：条目到这里还是
+    /// 问这一条通道的模型，把回答里的条目收进这个窗口自己的坐标系，并吸附到量出来的人声边界上 ——
+    /// 那些边界量在这一段媒体上，吸附必须在段内做。平移不在这里：条目到这里还是
     /// <see cref="SubtitleWindowCue"/>。
     ///
-    /// <paramref name="memory"/> 不为 <c>null</c> 才在提示词里要新术语、才解析回答里那一行。
+    /// 这一条通道要回收术语，才在提示词里要新术语、才解析回答里那一行（见 <see cref="TermExchange"/>）。
     /// </summary>
     private async Task<WindowOutcome> AskAsync(
-        SubtitleCueLane lane,
-        IMultimodalModel model,
+        Channel channel,
         MediaWindow window,
         WindowMedia media,
-        IReadOnlyList<GlossaryTerm>? terms,
-        GlossaryFile? memory,
         CancellationToken cancellationToken)
     {
-        var prompt = Prompt.Build(lane, window, terms, collectTerms: memory is not null, model.PromptTemplate);
-        var reply = await model
+        var prompt = Prompt.Build(channel.Lane, window, channel.Terms, channel.Model.PromptTemplate);
+        var reply = await channel.Model
             .CompleteAsync(new ModelRequest(prompt, media.Part), cancellationToken)
             .ConfigureAwait(false);
 
-        var cues = Srt.Parse(Srt.StripDecorations(reply.Text), lane)
+        var cues = Srt.Parse(Srt.StripDecorations(reply.Text), channel.Lane)
             .Select(cue => media.Speech is { } speech
                 ? cue with { Start = speech.SnapStart(cue.Start), End = speech.SnapEnd(cue.End) }
                 : cue)
@@ -269,7 +269,7 @@ internal sealed class Subtitler(
         return new WindowOutcome(
             cues,
             // 不回收术语的那一遍（画面、--no-glossary）没人收，连解析都不做。
-            memory is null ? [] : Srt.ParseGlossary(reply.Text),
+            channel.Terms.Collects ? Srt.ParseGlossary(reply.Text) : [],
             reply.InputTokens,
             reply.OutputTokens);
     }

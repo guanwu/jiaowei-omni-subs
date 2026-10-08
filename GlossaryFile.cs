@@ -71,9 +71,6 @@ internal sealed class GlossaryFile
 
     public int Count => _terms.Count;
 
-    /// <summary>当前的全部术语，最先进来的排在最前。</summary>
-    public IReadOnlyList<GlossaryTerm> Terms => _terms;
-
     /// <summary>本次打开时文件是否已经存在，仅用于把「新建」和「已有 0 条」区分开。</summary>
     public bool Exists { get; private set; }
 
@@ -160,7 +157,8 @@ internal sealed class GlossaryFile
     }
 
     /// <summary>
-    /// 此刻已经定下的译名的一份拷贝 —— 读的那一边要的是一份不会再变的东西。
+    /// 此刻已经定下的译名的一份拷贝，最先进来的排在最前 —— 读的人拿到的是一份不会再变的东西，
+    /// 于是另一条通道边读边写也不会看到半成品。这是读表的唯一一条路。
     /// </summary>
     public IReadOnlyList<GlossaryTerm> Snapshot()
     {

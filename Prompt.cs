@@ -79,17 +79,15 @@ internal static class Prompt
         """;
 
     /// <summary>
-    /// 拼出一个窗口的请求。<paramref name="rulesOverride"/> 是档位自带的提示词模板，
-    /// 给了就用它替掉按通道的那段规则；段的位置说明与术语段不受它影响。
-    ///
-    /// <paramref name="terms"/> 是要它沿用的已定译名，<c>null</c> 表示这一遍不谈术语（<c>--no-glossary</c>）。
-    /// <paramref name="collectTerms"/> 是它要不要把本段新定下的名字报回来；不回收的那一遍（画面）就不问。
+    /// 拼出一个窗口的请求。<paramref name="exchange"/> 是这一条通道跟术语表打交道的方式 ——
+    /// 要它沿用的译名、以及要不要它把本段新定下的名字报回来，都由这一处说清。
+    /// <paramref name="rulesOverride"/> 是档位自带的提示词模板，给了就用它替掉按通道的那段规则；
+    /// 段的位置说明与术语段不受它影响。
     /// </summary>
     public static string Build(
         SubtitleCueLane lane,
         MediaWindow window,
-        IReadOnlyList<GlossaryTerm>? terms,
-        bool collectTerms,
+        TermExchange exchange,
         string? rulesOverride = null)
     {
         var subject = lane == SubtitleCueLane.Audio ? "本段音频" : "本段画面";
@@ -102,12 +100,12 @@ internal static class Prompt
             ? lane == SubtitleCueLane.Audio ? DialogueRules : VideoRules
             : rulesOverride;
 
-        return header + rules + Terms(terms, collectTerms);
+        return header + rules + Terms(exchange);
     }
 
-    private static string Terms(IReadOnlyList<GlossaryTerm>? terms, bool collect)
+    private static string Terms(TermExchange exchange)
     {
-        if (terms is null)
+        if (exchange.Reuse() is not { } terms)
         {
             return string.Empty;
         }
@@ -115,13 +113,13 @@ internal static class Prompt
         if (terms.Count == 0)
         {
             // 一条既定译名都还没有：要不要它开始定名，取决于这一遍回不回收。
-            return collect ? IntroduceTerms : string.Empty;
+            return exchange.Collects ? IntroduceTerms : string.Empty;
         }
 
         var list = string.Join("; ", terms.Select(term => $"{term.Source} → {term.Target}"));
 
         return "\n\n前面已经出现过的专有名词必须沿用下面的译名，不得另起新译名：\n\n"
             + list
-            + (collect ? ReuseTermsTail : string.Empty);
+            + (exchange.Collects ? ReuseTermsTail : string.Empty);
     }
 }
