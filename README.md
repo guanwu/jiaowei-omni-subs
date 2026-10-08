@@ -139,4 +139,14 @@ dotnet publish -c Release # Native AOT 产物
 `dotnet publish -c Release`，把 `mpv/main.lua`、产物 `omnisubs.exe`、现取的一份 ffmpeg/ffprobe
 放进同一个 `omnisubs/` 目录，配一份**密钥留空**的 `omnisubs.json`，打成 zip 挂上去。
 
+发一版的过程（**关键是"发布 Release"这一步，只推 tag、或只存成草稿都不算**）：
+
+1. GitHub 上 `Releases` → `Draft a new release` → 新建 tag（例如 `v1.0.0`）→ 点 **`Publish release`**。
+2. 这次发布触发 workflow，两分钟左右 Release 上就多出一个资产 `omnisubs-mpv-win-x64.zip`；
+   从那以后用户下载的就是它。
+
+Actions 页里手动 `Run workflow` 那一路**只组包、不上传** —— 包留在 run 的 artifact 里（要登录才能下），
+它只用来验证这一步。**所以手动跑出一片绿色并不代表 Release 上有包**；要重新生成某个版本的包，
+从那次 release 触发的 run 上点 `Re-run all jobs`。
+
 本项目没有测试工程；验证素材是根目录的 `Video.mkv`（未进版本库）。
