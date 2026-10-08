@@ -160,21 +160,19 @@ internal sealed class OpenAiModel(OpenAiResolvedProfile profile) : IMultimodalMo
     {
         var payload = BuildPayload(request);
 
-        for (var attempt = 1; ; attempt++)
+        try
         {
-            try
-            {
-                return await SendAsync(payload, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (attempt == 1
-                                       && IsRetryable(ex)
-                                       && !cancellationToken.IsCancellationRequested)
-            {
-                // 只重试一次，且只重试重发可能成功的失败（网络错误、5xx、限流、超时）。
-                Log.Warn($"        模型请求失败，重试一次：{ex.Message}");
-                await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
-            }
+            return await SendAsync(payload, cancellationToken).ConfigureAwait(false);
         }
+        catch (Exception ex) when (IsRetryable(ex) && !cancellationToken.IsCancellationRequested)
+        {
+            // 只重试一次，且只重试重发可能成功的失败（网络错误、5xx、限流、超时）。
+            Log.Warn($"        模型请求失败，重试一次：{ex.Message}");
+            await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+        }
+
+        // 就再问一遍；这一遍无论成是败都交给调用方，重试策略到此为止。
+        return await SendAsync(payload, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>把一次请求拼成一整份 JSON；媒体以 base64 内联在请求里（data URI）。</summary>
