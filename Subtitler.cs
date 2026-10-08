@@ -161,6 +161,9 @@ internal sealed class Subtitler(
     /// <summary>
     /// 取这一窗的媒体、问模型、把回答收进这个窗口自己的坐标系。
     ///
+    /// 提示词在取媒体之前就拼好：要沿用的译名以"进入这一窗时"为准，取媒体花掉的那点时间不算进去
+    /// （对白那一条在同一段时间里正往表里写新名字，晚一步拿到的就是另一份译名）。
+    ///
     /// 一段坏掉不带走整部片子：代价是这一段内容缺失，所以要把缺在哪报清楚，作废的段数记在通道上，
     /// 返回 <c>null</c> 表示这一窗什么都没拿到。取消不是这一段的错，整次运行到此为止。
     /// </summary>
@@ -171,8 +174,9 @@ internal sealed class Subtitler(
     {
         try
         {
+            var prompt = Prompt.Build(channel.Lane, window, channel.Terms, channel.Model.PromptTemplate);
             var media = await channel.Read(window, cancellationToken).ConfigureAwait(false);
-            return await AskAsync(channel, window, media, cancellationToken).ConfigureAwait(false);
+            return await AskAsync(channel, prompt, media, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -247,15 +251,15 @@ internal sealed class Subtitler(
     /// 那些边界量在这一段媒体上，吸附必须在段内做。平移不在这里：条目到这里还是
     /// <see cref="SubtitleWindowCue"/>。
     ///
-    /// 这一条通道要回收术语，才在提示词里要新术语、才解析回答里那一行（见 <see cref="TermExchange"/>）。
+    /// 提示词由调用方给定（见 <see cref="AskWindowAsync"/>）：它得在取媒体之前拼好。
+    /// 这一条通道要回收术语，提示词里才会要新术语、这里才解析回答里那一行（见 <see cref="TermExchange"/>）。
     /// </summary>
     private async Task<WindowOutcome> AskAsync(
         Channel channel,
-        MediaWindow window,
+        string prompt,
         WindowMedia media,
         CancellationToken cancellationToken)
     {
-        var prompt = Prompt.Build(channel.Lane, window, channel.Terms, channel.Model.PromptTemplate);
         var reply = await channel.Model
             .CompleteAsync(new ModelRequest(prompt, media.Part), cancellationToken)
             .ConfigureAwait(false);
