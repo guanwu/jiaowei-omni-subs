@@ -16,29 +16,6 @@ internal sealed class Subtitler(
     IMultimodalModel? videoModel,
     string? audioTrack)
 {
-    /// <summary>两段内容挨得多近才算同一段被两个窗口各译了一遍。</summary>
-    private static readonly TimeSpan DuplicateTolerance = TimeSpan.FromSeconds(2.5);
-
-    /// <summary>
-    /// 一条译好的条目，连同是哪个窗口产出它的。条目本身还是段内时刻
-    /// （<see cref="SubtitleWindowCue"/>），换算成整片时刻只在 <see cref="Place"/> 里做。
-    /// </summary>
-    private sealed record Candidate(SubtitleWindowCue Cue, MediaWindow Window)
-    {
-        /// <summary>这条条目在整部影片上的起点。</summary>
-        public TimeSpan AbsoluteStart => Place().Start;
-
-        /// <summary>它离产出它的那个窗口的中心有多远；越远说明那一窗看它看得越不完整。</summary>
-        public TimeSpan DistanceFromCentre => ((Cue.Start + Cue.End) / 2 - Window.Duration / 2).Duration();
-
-        /// <summary>把它放回整部影片的时间轴上。</summary>
-        public SubtitleCue Place() => new(
-            Window.Start + Cue.Start,
-            Window.Start + Cue.End,
-            Cue.Text,
-            Cue.Lane);
-    }
-
     /// <summary>一个窗口要交给模型的东西：一段媒体，以及（只有对白才有）量出来的人声边界。</summary>
     private sealed record WindowMedia(ModelMediaPart Part, MediaSpeechMap? Speech);
 
@@ -108,9 +85,6 @@ internal sealed class Subtitler(
             channels.Add(onVideo);
         }
 
-        // 两条通道各跑各的，但都往同一份 .srt 上写，所以写这一下要排队。
-        var publishing = new Lock();
-
         // 一条通道在自己的任务里走完全部窗口。两条通道的差别只剩两处：取媒体，
         // 以及沿用的译名从哪儿来 —— 后者按窗给。
         async Task RunLaneAsync(Channel channel, Func<IReadOnlyList<GlossaryTerm>?> terms)
@@ -122,11 +96,8 @@ internal sealed class Subtitler(
 
                 if (changed)
                 {
-                    // 这一段有东西，立刻重写一次磁盘上的字幕。
-                    lock (publishing)
-                    {
-                        subtitle.Publish(Srt.Compose(Combined(channels)));
-                    }
+                    // 这一段有东西，立刻重写一次磁盘上的字幕（两条通道的排队由 SubtitleFile 自己管）。
+                    subtitle.Publish(Srt.Compose(Combined(channels)));
                 }
             }
         }
@@ -208,10 +179,7 @@ internal sealed class Subtitler(
             return false;
         }
 
-        channel.Candidates.AddRange(outcome.Cues.Select(cue => new Candidate(cue, window)));
-
-        // 去重是对整个候选列表算的，交出去的始终是"到目前为止完整的那一份"。
-        channel.Published = DropDuplicates(channel.Candidates);
+        channel.Cues.Add(window, outcome.Cues);
         return true;
     }
 
@@ -240,11 +208,8 @@ internal sealed class Subtitler(
         /// <summary>日志与小结里这条通道的名字。</summary>
         public string Label => lane == SubtitleCueLane.Audio ? "对白" : "画面";
 
-        /// <summary>这一条通道收下的全部候选；跨窗去重是对整个列表算的。</summary>
-        public List<Candidate> Candidates { get; } = [];
-
-        /// <summary>到这一刻为止交出去的那一份。</summary>
-        public List<SubtitleCue> Published { get; set; } = [];
+        /// <summary>这一条通道收下的条目；跨窗去重与换算整片时刻都归它管。</summary>
+        public LaneCues Cues { get; } = new();
 
         public int InputTokens { get; set; }
 
@@ -259,15 +224,16 @@ internal sealed class Subtitler(
 
     /// <summary>两条通道合起来的那一份 —— 磁盘上写的、最后交出去的，都是它。</summary>
     private static List<SubtitleCue> Combined(IReadOnlyList<Channel> channels) =>
-        [.. channels.SelectMany(channel => channel.Published)];
+        [.. channels.SelectMany(channel => channel.Cues.Placed)];
 
     /// <summary>一条通道跑完时的两行小结：收了几条，花了多少。</summary>
     private static void DescribeChannel(Channel channel)
     {
-        Log.Info($"    {channel.Label}结果 : {channel.Published.Count} 条"
-            + (channel.Candidates.Count > channel.Published.Count
-                ? $"（跨窗重复丢掉 {channel.Candidates.Count - channel.Published.Count} 条）"
-                : string.Empty)
+        var placed = channel.Cues.Placed;
+        var dropped = channel.Cues.Received - placed.Count;
+
+        Log.Info($"    {channel.Label}结果 : {placed.Count} 条"
+            + (dropped > 0 ? $"（跨窗重复丢掉 {dropped} 条）" : string.Empty)
             + (channel.Blank > 0 ? $" · {channel.Blank} 段没有内容" : string.Empty)
             + (channel.Failed > 0 ? $" · {channel.Failed} 段作废" : string.Empty));
         Log.Info($"    {channel.Label}用量 : 输入 {channel.InputTokens} · 输出 {channel.OutputTokens} tokens");
@@ -331,48 +297,5 @@ internal sealed class Subtitler(
     {
         var part = await media.ReadVideoAsync(input, window, cancellationToken).ConfigureAwait(false);
         return new WindowMedia(part, null);
-    }
-
-    /// <summary>
-    /// 丢掉两个窗口把同一段内容各译了一遍时多出来的那一份，留离自己窗口中心更近的那一份。
-    /// 配对只按时间、且只在同一条通道之内做。
-    /// </summary>
-    private static List<SubtitleCue> DropDuplicates(List<Candidate> candidates)
-    {
-        var ordered = candidates.OrderBy(candidate => candidate.AbsoluteStart).ToList();
-        var dropped = new HashSet<Candidate>();
-
-        for (var i = 0; i < ordered.Count; i++)
-        {
-            if (dropped.Contains(ordered[i]))
-            {
-                continue;
-            }
-
-            for (var j = i + 1; j < ordered.Count; j++)
-            {
-                if (ordered[j].AbsoluteStart - ordered[i].AbsoluteStart > DuplicateTolerance)
-                {
-                    break;
-                }
-
-                // 同一个窗口里的两条不是重复；已挑掉的那条也不再参与。
-                if (ordered[j].Window.Index == ordered[i].Window.Index || dropped.Contains(ordered[j]))
-                {
-                    continue;
-                }
-
-                dropped.Add(
-                    ordered[j].DistanceFromCentre < ordered[i].DistanceFromCentre
-                        ? ordered[i]
-                        : ordered[j]);
-                break;
-            }
-        }
-
-        return ordered
-            .Where(candidate => !dropped.Contains(candidate))
-            .Select(candidate => candidate.Place())
-            .ToList();
     }
 }

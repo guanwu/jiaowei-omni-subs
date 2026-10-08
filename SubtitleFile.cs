@@ -8,6 +8,9 @@ namespace OmniSubs.Subtitles;
 /// </summary>
 internal sealed class SubtitleFile(string path)
 {
+    /// <summary>写盘排队用。两条通道各跑各的，但都往这一份文件上写，先后由这份文件自己管。</summary>
+    private readonly Lock _gate = new();
+
     public string FilePath { get; } = path;
 
     /// <summary>
@@ -33,27 +36,30 @@ internal sealed class SubtitleFile(string path)
             return;
         }
 
-        try
+        lock (_gate)
         {
-            Srt.Save(FilePath, cues);
-
-            // 第一次写成时说一声：从这一刻起用户就有字幕可看了。后面每段重写不再重复报。
-            if (!_announced)
+            try
             {
-                _announced = true;
-                Log.Info($"    字幕可用 : {FilePath}（此后每走完一个窗口重写一次）");
-            }
+                Srt.Save(FilePath, cues);
 
-            LastError = null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            if (LastError is null)
+                // 第一次写成时说一声：从这一刻起用户就有字幕可看了。后面每段重写不再重复报。
+                if (!_announced)
+                {
+                    _announced = true;
+                    Log.Info($"    字幕可用 : {FilePath}（此后每走完一个窗口重写一次）");
+                }
+
+                LastError = null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                Log.Warn($"        字幕暂时写不出去，下个窗口再试：{ex.Message}");
-            }
+                if (LastError is null)
+                {
+                    Log.Warn($"        字幕暂时写不出去，下个窗口再试：{ex.Message}");
+                }
 
-            LastError = ex.Message;
+                LastError = ex.Message;
+            }
         }
     }
 }
