@@ -1,4 +1,3 @@
-using System.Text;
 using OmniSubs.Cli;
 using OmniSubs.Config;
 using OmniSubs.Glossary;
@@ -22,25 +21,27 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
-        TrySetUtf8Console();
+        Log.UseUtf8Console();
 
         if (!CliOptions.TryParse(args, out var options, out var parseError))
         {
             Log.Error(parseError!);
-            Console.WriteLine();
-            Console.WriteLine(CliOptions.Usage);
+            Log.Info(string.Empty);
+            Log.Info(CliOptions.Usage);
             return ExitUsageError;
         }
 
         if (options.ShowHelp)
         {
-            Console.WriteLine(CliOptions.Usage);
+            Log.Info(CliOptions.Usage);
             return ExitSuccess;
         }
 
         // 进度文件在读配置之前开：配置、凭据失败的那几次运行也要留下终态记录。
-        if (!Log.OpenProgressFile(options.ProgressFile))
+        var progress = new ProgressFile();
+        if (!progress.TryOpen(options.ProgressFile, out var progressError))
         {
+            Log.Error(progressError!);
             return ExitUsageError;
         }
 
@@ -50,8 +51,8 @@ internal static class Program
         }
         finally
         {
-            // 终态只写这一处，任何返回点都经过它。
-            Log.ProgressEnd();
+            // 终态只写这一处，任何返回点都经过它；没过成时，原因就是最后报出去的那一条错误。
+            progress.Finish(Log.LastError);
         }
     }
 
@@ -105,7 +106,7 @@ internal static class Program
         }
 
         Log.Info($"    待处理   : {targets.Count} 个视频");
-        Console.WriteLine();
+        Log.Info(string.Empty);
 
         var subtitler = new Subtitler(
             media,
@@ -174,7 +175,7 @@ internal static class Program
             }
         }
 
-        Console.WriteLine();
+        Log.Info(string.Empty);
 
         if (produced < targets.Count)
         {
@@ -297,16 +298,4 @@ internal static class Program
 
     private static bool IsVideoFile(string path) =>
         Defaults.VideoExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
-
-    private static void TrySetUtf8Console()
-    {
-        try
-        {
-            Console.OutputEncoding = Encoding.UTF8;
-        }
-        catch (Exception)
-        {
-            // 控制台被重定向或受限，用默认编码即可。
-        }
-    }
 }
