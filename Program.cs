@@ -75,10 +75,9 @@ internal static class Program
                 : ExitConfigError;
         }
 
-        var targets = ResolveTargets(options, out var listingError);
-        if (listingError is not null)
+        if (!Targets.TryResolve(options.Inputs, out var targets, out var listingError))
         {
-            Log.Error(listingError);
+            Log.Error(listingError!);
             return ExitUsageError;
         }
 
@@ -98,8 +97,8 @@ internal static class Program
         Log.Step("本次执行");
         DescribeBinding(binding, options);
 
-        var glossaries = new Dictionary<string, GlossaryFile>(StringComparer.OrdinalIgnoreCase);
-        if (!LoadGlossaries(options, targets, glossaries, out var glossaryError))
+        var glossaries = Glossaries.Load(targets, options.NoGlossary, out var glossaryError);
+        if (glossaries is null)
         {
             Log.Error(glossaryError!);
             return ExitConfigError;
@@ -129,7 +128,7 @@ internal static class Program
             var name = Path.GetFileName(target);
             Log.Step(name);
 
-            var glossary = glossaries.GetValueOrDefault(Path.GetDirectoryName(target)!);
+            var glossary = glossaries.For(target);
             var subtitle = SubtitleFile.ForVideo(target);
 
             try
@@ -209,93 +208,4 @@ internal static class Program
             ? $"    视频字幕 : 已启用 · 档位 {video.Id} · {video.Model}"
             : "    视频字幕 : 未启用（加 --model-video <档位id> 开启）");
     }
-
-    /// <summary>
-    /// 每个输入目录各读一份术语记忆并逐个报出；任何一份读不动都返回 <c>false</c> 并给出 <paramref name="error"/>。
-    /// </summary>
-    private static bool LoadGlossaries(
-        CliOptions options,
-        List<string> targets,
-        Dictionary<string, GlossaryFile> glossaries,
-        out string? error)
-    {
-        error = null;
-
-        if (options.NoGlossary)
-        {
-            Log.Info("    术语记忆 : 已关闭，本次不读不写");
-            return true;
-        }
-
-        foreach (var directory in targets
-                     .Select(Path.GetDirectoryName)
-                     .Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            var glossary = GlossaryFile.ForDirectory(directory!);
-            if (!glossary.TryLoad(out error))
-            {
-                return false;
-            }
-
-            glossaries[directory!] = glossary;
-
-            Log.Info($"    术语记忆 : {glossary.FilePath}"
-                + $"（{(glossary.Exists ? $"已有 {glossary.Count} 条" : "新建")}）· 只由对白写入");
-        }
-
-        return true;
-    }
-
-    private static List<string> ResolveTargets(CliOptions options, out string? error)
-    {
-        error = null;
-        var results = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var input in options.Inputs)
-        {
-            if (File.Exists(input))
-            {
-                var full = Path.GetFullPath(input);
-                if (!IsVideoFile(full))
-                {
-                    error = $"不支持的文件类型：{input}";
-                    return [];
-                }
-
-                if (seen.Add(full))
-                {
-                    results.Add(full);
-                }
-
-                continue;
-            }
-
-            if (Directory.Exists(input))
-            {
-                // 目录递归是固定行为，没有开关。
-                foreach (var file in Directory
-                             .EnumerateFiles(input, "*", SearchOption.AllDirectories)
-                             .Where(IsVideoFile)
-                             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
-                {
-                    var full = Path.GetFullPath(file);
-                    if (seen.Add(full))
-                    {
-                        results.Add(full);
-                    }
-                }
-
-                continue;
-            }
-
-            error = $"输入路径不存在：{input}";
-            return [];
-        }
-
-        return results;
-    }
-
-    private static bool IsVideoFile(string path) =>
-        Defaults.VideoExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 }
