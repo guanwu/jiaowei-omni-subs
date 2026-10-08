@@ -74,6 +74,26 @@ internal sealed class CliOptions
           -h, --help                显示本帮助
         """;
 
+    /// <summary>不带值的选项。</summary>
+    private static readonly Dictionary<string, Action<CliOptions>> Flags = new(StringComparer.Ordinal)
+    {
+        ["-h"] = options => options.ShowHelp = true,
+        ["--help"] = options => options.ShowHelp = true,
+        ["--no-glossary"] = options => options.NoGlossary = true,
+    };
+
+    /// <summary>
+    /// 要接一个值的选项。值原样收下：档位是否存在、凭据有没有配齐，是配置加载之后的事
+    /// （见 <see cref="OpenAiBinding"/>）。
+    /// </summary>
+    private static readonly Dictionary<string, Action<CliOptions, string>> Valued = new(StringComparer.Ordinal)
+    {
+        ["--model-audio"] = (options, value) => options.AudioProfileId = value,
+        ["--model-video"] = (options, value) => options.VideoProfileId = value,
+        ["--audio-track"] = (options, value) => options.AudioTrack = value,
+        ["--progress-file"] = (options, value) => options.ProgressFile = value,
+    };
+
     public static bool TryParse(string[] args, out CliOptions options, out string? error)
     {
         options = new CliOptions();
@@ -83,27 +103,33 @@ internal sealed class CliOptions
         {
             var arg = args[i];
 
+            // 不以横线开头的都是输入，可以出现在选项之间。
             if (!arg.StartsWith('-'))
             {
                 options.Inputs.Add(arg);
                 continue;
             }
 
-            if (TrySetFlag(options, arg))
+            if (Flags.TryGetValue(arg, out var flag))
             {
+                flag(options);
                 continue;
             }
 
-            // 取下一个参数作为本选项的值；参数不够由处理函数报，它会指出是哪个选项要值。
-            string? Value() => i + 1 < args.Length ? args[++i] : null;
-
-            if (TrySetValue(options, arg, Value, ref error))
+            if (Valued.TryGetValue(arg, out var apply))
             {
+                // 缺值不拿下一个参数顶替：写清是哪个选项要值就退出。
+                if (i + 1 >= args.Length)
+                {
+                    error = $"选项 {arg} 需要一个值。";
+                    return false;
+                }
+
+                apply(options, args[++i]);
                 continue;
             }
 
-            // 这里要么是选项不认识，要么是处理函数已拒了这个值并写好了 error。
-            error ??= $"无法识别的选项：{arg}";
+            error = $"无法识别的选项：{arg}";
             return false;
         }
 
@@ -114,56 +140,6 @@ internal sealed class CliOptions
 
         error = options.Validate();
         return error is null;
-    }
-
-    private static bool TrySetFlag(CliOptions options, string arg)
-    {
-        switch (arg)
-        {
-            case "-h" or "--help":
-                options.ShowHelp = true;
-                return true;
-            case "--no-glossary":
-                options.NoGlossary = true;
-                return true;
-            default:
-                return false;
-        }
-    }
-
-    /// <summary>处理带值的选项。返回 false 只代表它已经写好了 error。</summary>
-    private static bool TrySetValue(CliOptions options, string arg, Func<string?> value, ref string? error)
-    {
-        switch (arg)
-        {
-            case "--model-audio":
-                return TryReadText(value(), arg, ref error, text => options.AudioProfileId = text);
-
-            case "--model-video":
-                return TryReadText(value(), arg, ref error, text => options.VideoProfileId = text);
-
-            case "--audio-track":
-                return TryReadText(value(), arg, ref error, text => options.AudioTrack = text);
-
-            case "--progress-file":
-                return TryReadText(value(), arg, ref error, path => options.ProgressFile = path);
-
-            default:
-                return false;
-        }
-    }
-
-    /// <summary>原样收下选项的值；档位是否存在、凭据有没有配齐，是配置加载之后的事。</summary>
-    private static bool TryReadText(string? raw, string option, ref string? error, Action<string> assign)
-    {
-        if (raw is null)
-        {
-            error = $"选项 {option} 需要一个值。";
-            return false;
-        }
-
-        assign(raw);
-        return true;
     }
 
     /// <summary>检查选项之间必须成立的约束。凭据与档位不在这里查，见 <see cref="OpenAiBinding"/>。</summary>

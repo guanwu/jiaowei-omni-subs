@@ -40,7 +40,7 @@ internal sealed class Subtitler(
         // 时长、音轨、有没有画面都是同一次 ffprobe 的结论，只探一次。
         var info = await media.ProbeAsync(input, cancellationToken).ConfigureAwait(false);
 
-        if (info.Select(audioTrack, out var trackError) is not { } track)
+        if (!info.TrySelect(audioTrack, out var track, out var trackError))
         {
             throw new MediaException(trackError!);
         }

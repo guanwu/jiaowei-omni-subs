@@ -135,7 +135,7 @@ internal static partial class Srt
     /// 把同一通道的条目按给定顺序修成一条合法时间轴：起点推到前一条说完之后，零长条目补足最短时长，
     /// 保证严格递增、互不重叠。
     /// </summary>
-    public static List<SubtitleCue> Normalize(IEnumerable<SubtitleCue> cues)
+    private static List<SubtitleCue> Normalize(IEnumerable<SubtitleCue> cues)
     {
         var result = new List<SubtitleCue>();
 
@@ -172,7 +172,7 @@ internal static partial class Srt
     /// <summary>
     /// 写成一份合规的 SRT：序号从 1 起、时间戳严格递增；换行与编码见 <see cref="Defaults"/>。置顶标签在这里加。
     /// </summary>
-    public static string Serialize(IReadOnlyList<SubtitleCue> cues)
+    private static string Serialize(IReadOnlyList<SubtitleCue> cues)
     {
         var builder = new StringBuilder();
         var number = 1;
@@ -196,7 +196,7 @@ internal static partial class Srt
     public static void Save(string path, IReadOnlyList<SubtitleCue> cues) =>
         File.WriteAllText(path, Serialize(cues), new UTF8Encoding(false));
 
-    public static string Format(TimeSpan value)
+    private static string Format(TimeSpan value)
     {
         if (value < TimeSpan.Zero)
         {

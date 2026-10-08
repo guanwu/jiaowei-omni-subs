@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 namespace OmniSubs.Media;
@@ -42,42 +43,47 @@ internal sealed record MediaInfo(TimeSpan Duration, IReadOnlyList<MediaAudioTrac
 
     /// <summary>
     /// 把 <c>--audio-track</c> 给的写法兑现成一条音轨。全数字按序号认，其余按语言代码认（大小写不敏感）；
-    /// 没给就是第一条。认不出来不猜：报出可用的有哪些。
+    /// 没给就是第一条。认不出来不猜：返回 <c>false</c>，并报出可用的有哪些。
     /// </summary>
-    public MediaAudioTrack? Select(string? spec, out string? error)
+    public bool TrySelect(
+        string? spec,
+        [NotNullWhen(true)] out MediaAudioTrack? track,
+        out string? error)
     {
+        track = null;
         error = null;
 
         // 探测时没有音轨就直接抛了，能走到这里至少有一条。
         if (string.IsNullOrWhiteSpace(spec))
         {
-            return AudioTracks[0];
+            track = AudioTracks[0];
+            return true;
         }
 
         var wanted = spec.Trim();
 
         if (int.TryParse(wanted, NumberStyles.None, CultureInfo.InvariantCulture, out var number))
         {
-            var byNumber = AudioTracks.FirstOrDefault(track => track.Number == number);
-            if (byNumber is not null)
+            track = AudioTracks.FirstOrDefault(item => item.Number == number);
+            if (track is not null)
             {
-                return byNumber;
+                return true;
             }
 
             error = $"这个文件没有第 {number} 条音轨。可用：{Available()}";
-            return null;
+            return false;
         }
 
-        var byLanguage = AudioTracks.FirstOrDefault(track =>
-            string.Equals(track.Language, wanted, StringComparison.OrdinalIgnoreCase));
+        track = AudioTracks.FirstOrDefault(item =>
+            string.Equals(item.Language, wanted, StringComparison.OrdinalIgnoreCase));
 
-        if (byLanguage is not null)
+        if (track is not null)
         {
-            return byLanguage;
+            return true;
         }
 
         error = $"这个文件没有语言为 {wanted} 的音轨。可用：{Available()}";
-        return null;
+        return false;
     }
 
     private string Available() => string.Join("、", AudioTracks.Select(track => track.Describe()));
